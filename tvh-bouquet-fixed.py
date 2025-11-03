@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-TVHeadend Bouquet Manager - FINALNA WERSJA DLA STRON BEZ KATEGORII
-- Kategorie: TYLKO przez colspan (jak w oryginale)
-- Jeśli colspan nie ma → WSZYSTKO do "Bez kategorii"
-- Czyste nazwy (bez DVB, H, 27500)
-- Brak duplikatów (globalna deduplikacja)
-- Ciągła numeracja 1, 2, 3...
+TVHeadend Bouquet Manager - Wersja poprawiona
+Główne zmiany:
+- Pobieranie wszystkich usług (nie tylko 50)
+- Czyszczenie nazw kanałów z parametrów technicznych
+- Heurystyka normalizacji przy dopasowywaniu
+- Unikanie duplikatów mapowania
 """
 
 import sys
@@ -24,54 +24,72 @@ import json
 
 
 class TVHeadendAPI:
+    """Klasa do komunikacji z TVHeadend API"""
+    
     def __init__(self, host, port, username="", password=""):
         self.base_url = f"http://{host}:{port}"
         self.auth = (username, password) if username else None
         
     def get_services(self):
+        """Pobiera WSZYSTKIE usługi (kanały) z TVHeadend"""
         try:
             all_services = []
             start = 0
-            limit = 5000
+            limit = 500
+            
             url = f"{self.base_url}/api/mpegts/service/grid"
+            
             while True:
                 params = {'start': start, 'limit': limit}
                 response = requests.get(url, params=params, auth=self.auth, timeout=10)
                 response.raise_for_status()
                 data = response.json()
+                
                 entries = data.get('entries', [])
                 total = data.get('total', 0)
+                
                 all_services.extend(entries)
+                
                 if len(all_services) >= total or len(entries) == 0:
                     break
+                
                 start += limit
+            
             return all_services
         except Exception as e:
             raise Exception(f"Błąd pobierania usług: {str(e)}")
     
     def get_channels(self):
+        """Pobiera wszystkie kanały z TVHeadend"""
         try:
             url = f"{self.base_url}/api/channel/grid"
-            response = requests.get(url, auth=self.auth, timeout=10)
+            params = {'start': 0, 'limit': 999999}
+            response = requests.get(url, params=params, auth=self.auth, timeout=10)
             response.raise_for_status()
-            return response.json().get('entries', [])
+            data = response.json()
+            return data.get('entries', [])
         except Exception as e:
             raise Exception(f"Błąd pobierania kanałów: {str(e)}")
     
     def get_tags(self):
+        """Pobiera listę tagów z TVHeadend"""
         try:
             url = f"{self.base_url}/api/channeltag/grid"
             response = requests.get(url, auth=self.auth, timeout=10)
             response.raise_for_status()
-            return response.json().get('entries', [])
+            data = response.json()
+            return data.get('entries', [])
         except Exception as e:
             raise Exception(f"Błąd pobierania tagów: {str(e)}")
     
     def create_tag(self, name, comment="", index=None):
+        """Tworzy nowy tag"""
         try:
             url = f"{self.base_url}/api/channeltag/create"
             conf = {'name': name, 'comment': comment, 'enabled': True}
-            if index is not None: conf['index'] = index
+            if index is not None:
+                conf['index'] = index
+            
             data = {'conf': json.dumps(conf)}
             response = requests.post(url, data=data, auth=self.auth, timeout=10)
             response.raise_for_status()
@@ -80,12 +98,17 @@ class TVHeadendAPI:
             raise Exception(f"Błąd tworzenia tagu: {str(e)}")
     
     def update_channel(self, channel_uuid, tags=None, number=None, name=None):
+        """Aktualizuje kanał"""
         try:
             url = f"{self.base_url}/api/channel/save"
             updates = {'uuid': channel_uuid}
-            if tags is not None: updates['tags'] = tags
-            if number is not None: updates['number'] = number
-            if name is not None: updates['name'] = name
+            if tags is not None:
+                updates['tags'] = tags
+            if number is not None:
+                updates['number'] = number
+            if name is not None:
+                updates['name'] = name
+            
             data = {'node': json.dumps(updates)}
             response = requests.post(url, data=data, auth=self.auth, timeout=10)
             response.raise_for_status()
@@ -94,11 +117,19 @@ class TVHeadendAPI:
             raise Exception(f"Błąd aktualizacji kanału: {str(e)}")
     
     def create_channel_from_service(self, service_uuid, name, tags=None, number=None):
+        """Tworzy kanał z usługi"""
         try:
             url = f"{self.base_url}/api/channel/create"
-            conf = {'services': [service_uuid], 'name': name, 'enabled': True}
-            if tags: conf['tags'] = tags
-            if number: conf['number'] = number
+            conf = {
+                'services': [service_uuid],
+                'name': name,
+                'enabled': True
+            }
+            if tags:
+                conf['tags'] = tags
+            if number:
+                conf['number'] = number
+            
             data = {'conf': json.dumps(conf)}
             response = requests.post(url, data=data, auth=self.auth, timeout=10)
             response.raise_for_status()
@@ -286,6 +317,8 @@ class BouquetParser:
 
 
 class ImportWorker(QThread):
+    """Wątek do importu bouquetów"""
+    
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(bool, str)
     
@@ -299,102 +332,154 @@ class ImportWorker(QThread):
         
     def run(self):
         try:
-            # === DEDUPLIKACJA GLOBALNA + CIĄGŁA NUMERACJA ===
-            unique_channels = {}
-            global_number = 1
-            for cat, chans in self.bouquets.items():
-                for ch in chans:
-                    norm = BouquetParser.normalize_channel_name(ch['name'])
-                    if norm and norm not in unique_channels:
-                        ch2 = ch.copy()
-                        ch2['number'] = global_number
-                        ch2['category'] = cat
-                        unique_channels[norm] = ch2
-                        global_number += 1
-
-            new_bouquets = {}
-            for norm, ch in unique_channels.items():
-                cat = ch['category']
-                new_bouquets.setdefault(cat, []).append(ch)
-            self.bouquets = new_bouquets
-
-            total_channels = sum(len(v) for v in self.bouquets.values())
-            processed = matched = created_channels = updated_channels = 0
-
-            self.progress.emit(0, "Pobieranie tagów...")
+            total_channels = sum(len(channels) for channels in self.bouquets.values())
+            processed = 0
+            matched = 0
+            created_channels = 0
+            updated_channels = 0
+            
+            self.progress.emit(0, "Pobieranie istniejących tagów...")
+            
             existing_tags = {tag['name']: tag['uuid'] for tag in self.api.get_tags()}
-
+            
+            # Twórz mapę usług z ZNORMALIZOWANYMI nazwami
             services_map = {}
-            for s in self.services:
-                name = s.get('svcname', '')
+            for service in self.services:
+                name = service.get('svcname', '')
                 if name:
-                    norm = BouquetParser.normalize_channel_name(name)
-                    services_map[norm] = s
-
-            self.progress.emit(5, f"Usług: {len(services_map)}")
-            self.progress.emit(10, "Pobieranie kanałów...")
+                    normalized = BouquetParser.normalize_channel_name(name)
+                    services_map[normalized] = service
+            
+            self.progress.emit(5, f"Znaleziono {len(services_map)} usług w TVHeadend")
+            
+            self.progress.emit(10, "Pobieranie istniejących kanałów...")
             existing_channels = self.api.get_channels()
             channels_by_service = {}
             for ch in existing_channels:
-                for svc_uuid in ch.get('services', []):
-                    channels_by_service[svc_uuid] = ch
-            self.progress.emit(15, f"Kanałów: {len(existing_channels)}")
-
+                services = ch.get('services', [])
+                if services:
+                    for svc_uuid in services:
+                        channels_by_service[svc_uuid] = ch
+            
+            self.progress.emit(15, f"Znaleziono {len(existing_channels)} istniejących kanałów")
+            
+            # Śledź już przetworzone usługi, aby uniknąć duplikatów
             processed_services = set()
+            
             tag_index = 0
-
             for category, channels in self.bouquets.items():
-                self.progress.emit(15 + int((processed / total_channels) * 70), f"Kategoria: {category}")
+                self.progress.emit(
+                    15 + int((processed / total_channels) * 70),
+                    f"Przetwarzam kategorię: {category}"
+                )
+                
                 tag_uuid = None
                 if self.create_tags:
                     if category in existing_tags:
                         tag_uuid = existing_tags[category]
                     else:
-                        result = self.api.create_tag(category, "Import z listy", tag_index)
+                        result = self.api.create_tag(category, f"Importowane z listy", tag_index)
                         tag_uuid = result.get('uuid')
                         existing_tags[category] = tag_uuid
                         tag_index += 1
-
-                for ch_info in channels:
-                    ch_name = ch_info['name']
-                    ch_num = ch_info['number']
-                    norm_search = BouquetParser.normalize_channel_name(ch_name)
-
+                        self.progress.emit(
+                            15 + int((processed / total_channels) * 70),
+                            f"  ✓ Utworzono tag '{category}'"
+                        )
+                
+                for channel_info in channels:
+                    channel_name = channel_info['name']
+                    channel_number = channel_info['number']
+                    
+                    # Znormalizowana nazwa do szukania
+                    normalized_search = BouquetParser.normalize_channel_name(channel_name)
+                    
                     best_match = None
                     best_score = 0
-                    variants = [norm_search, norm_search.replace(' ', ''), norm_search.replace('+', ' plus'), norm_search.replace('+', '')]
-
-                    for svc_norm, service in services_map.items():
-                        if svc_norm in processed_services: continue
-                        for v in variants:
-                            score = SequenceMatcher(None, v, svc_norm).ratio()
+                    best_service_name = ""
+                    
+                    # Warianty do sprawdzenia
+                    search_variants = [
+                        normalized_search,
+                        normalized_search.replace(' ', ''),
+                        normalized_search.replace('+', ' plus'),
+                        normalized_search.replace('+', ''),
+                    ]
+                    
+                    for service_norm_name, service in services_map.items():
+                        service_uuid = service['uuid']
+                        
+                        # Pomiń już przetworzone usługi
+                        if service_uuid in processed_services:
+                            continue
+                        
+                        for variant in search_variants:
+                            score = SequenceMatcher(None, variant, service_norm_name).ratio()
                             if score > best_score:
                                 best_score = score
                                 best_match = service
-
+                                best_service_name = service.get('svcname', '')
+                    
                     if best_match and best_score >= self.threshold:
-                        svc_uuid = best_match['uuid']
-                        processed_services.add(svc_uuid)
-                        if svc_uuid in channels_by_service:
-                            ch = channels_by_service[svc_uuid]
-                            tags = ch.get('tags', [])
+                        service_uuid = best_match['uuid']
+                        
+                        # Oznacz jako przetworzoną
+                        processed_services.add(service_uuid)
+                        
+                        if service_uuid in channels_by_service:
+                            existing_channel = channels_by_service[service_uuid]
+                            tags = existing_channel.get('tags', [])
                             if tag_uuid and tag_uuid not in tags:
                                 tags.append(tag_uuid)
-                            self.api.update_channel(ch['uuid'], tags, ch_num, ch_name)
+                            
+                            self.api.update_channel(
+                                existing_channel['uuid'],
+                                tags=tags,
+                                number=channel_number,
+                                name=channel_name
+                            )
                             updated_channels += 1
+                            self.progress.emit(
+                                15 + int((processed / total_channels) * 70),
+                                f"  ✓ Zaktualizowano: {channel_name} <- {best_service_name} ({best_score:.0%})"
+                            )
                         else:
                             tags = [tag_uuid] if tag_uuid else []
-                            self.api.create_channel_from_service(svc_uuid, ch_name, tags, ch_num)
+                            self.api.create_channel_from_service(
+                                service_uuid,
+                                channel_name,
+                                tags=tags,
+                                number=channel_number
+                            )
                             created_channels += 1
+                            self.progress.emit(
+                                15 + int((processed / total_channels) * 70),
+                                f"  ✓ Utworzono: {channel_name} <- {best_service_name} ({best_score:.0%})"
+                            )
+                        
                         matched += 1
+                    else:
+                        self.progress.emit(
+                            15 + int((processed / total_channels) * 70),
+                            f"  ✗ Nie znaleziono: {channel_name} (najlepsze: {best_score:.0%})"
+                        )
+                    
                     processed += 1
-
-            self.progress.emit(100, "Zakończono!")
-            summary = f"Import zakończony!\nPrzetworzono: {processed}\nDopasowano: {matched}\nUtworzono: {created_channels}\nZaktualizowano: {updated_channels}\nNie dopasowano: {processed-matched}"
+            
+            self.progress.emit(100, "Import zakończony!")
+            
+            summary = (
+                f"Import zakończony!\n\n"
+                f"Przetworzono: {processed} kanałów\n"
+                f"Dopasowano: {matched} kanałów\n"
+                f"Utworzono nowych: {created_channels}\n"
+                f"Zaktualizowano: {updated_channels}\n"
+                f"Nie dopasowano: {processed - matched}"
+            )
             self.finished.emit(True, summary)
-
+            
         except Exception as e:
-            self.finished.emit(False, f"Błąd: {str(e)}")
+            self.finished.emit(False, f"Błąd importu: {str(e)}")
 
 
 class MainWindow(QMainWindow):
@@ -408,94 +493,214 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         self.setWindowTitle("TVHeadend Bouquet Manager")
         self.setGeometry(100, 100, 900, 700)
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-
-        tvh_g = QGroupBox("TVHeadend")
-        tvh_l = QVBoxLayout()
-        conn_l = QHBoxLayout()
-        conn_l.addWidget(QLabel("Host:")); self.host_input = QLineEdit("localhost"); conn_l.addWidget(self.host_input)
-        conn_l.addWidget(QLabel("Port:")); self.port_input = QLineEdit("9981"); self.port_input.setMaximumWidth(80); conn_l.addWidget(self.port_input)
-        conn_l.addWidget(QLabel("Login:")); self.user_input = QLineEdit(); self.user_input.setMaximumWidth(120); conn_l.addWidget(self.user_input)
-        conn_l.addWidget(QLabel("Hasło:")); self.pass_input = QLineEdit(); self.pass_input.setEchoMode(QLineEdit.EchoMode.Password); self.pass_input.setMaximumWidth(120); conn_l.addWidget(self.pass_input)
-        self.connect_btn = QPushButton("Połącz"); self.connect_btn.clicked.connect(self.connect_tvh); conn_l.addWidget(self.connect_btn)
-        tvh_l.addLayout(conn_l)
-        self.services_label = QLabel("Status: Niepołączony"); tvh_l.addWidget(self.services_label)
-        tvh_g.setLayout(tvh_l); layout.addWidget(tvh_g)
-
-        src_g = QGroupBox("Lista kanałów")
-        src_l = QVBoxLayout()
-        url_l = QHBoxLayout()
-        url_l.addWidget(QLabel("URL:")); self.url_input = QLineEdit(); self.url_input.setPlaceholderText("https://satkurier.pl/news/234203/lista-kanalow-polsat-box.html"); url_l.addWidget(self.url_input)
-        self.parse_btn = QPushButton("Pobierz"); self.parse_btn.clicked.connect(self.parse_bouquet); self.parse_btn.setEnabled(False); url_l.addWidget(self.parse_btn)
-        src_l.addLayout(url_l); src_g.setLayout(src_l); layout.addWidget(src_g)
-
+        
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget)
+        
+        tvh_group = QGroupBox("Konfiguracja TVHeadend")
+        tvh_layout = QVBoxLayout()
+        
+        conn_layout = QHBoxLayout()
+        conn_layout.addWidget(QLabel("Host:"))
+        self.host_input = QLineEdit("localhost")
+        conn_layout.addWidget(self.host_input)
+        
+        conn_layout.addWidget(QLabel("Port:"))
+        self.port_input = QLineEdit("9981")
+        self.port_input.setMaximumWidth(80)
+        conn_layout.addWidget(self.port_input)
+        
+        conn_layout.addWidget(QLabel("Login:"))
+        self.user_input = QLineEdit()
+        self.user_input.setMaximumWidth(120)
+        conn_layout.addWidget(self.user_input)
+        
+        conn_layout.addWidget(QLabel("Hasło:"))
+        self.pass_input = QLineEdit()
+        self.pass_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pass_input.setMaximumWidth(120)
+        conn_layout.addWidget(self.pass_input)
+        
+        self.connect_btn = QPushButton("Połącz")
+        self.connect_btn.clicked.connect(self.connect_tvh)
+        conn_layout.addWidget(self.connect_btn)
+        
+        tvh_layout.addLayout(conn_layout)
+        
+        self.services_label = QLabel("Status: Niepołączony")
+        tvh_layout.addWidget(self.services_label)
+        
+        tvh_group.setLayout(tvh_layout)
+        layout.addWidget(tvh_group)
+        
+        source_group = QGroupBox("Lista kanałów źródłowa")
+        source_layout = QVBoxLayout()
+        
+        url_layout = QHBoxLayout()
+        url_layout.addWidget(QLabel("URL listy:"))
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("https://satkurier.pl/news/234203/lista-kanalow-polsat-box.html")
+        url_layout.addWidget(self.url_input)
+        
+        self.parse_btn = QPushButton("Pobierz listę")
+        self.parse_btn.clicked.connect(self.parse_bouquet)
+        self.parse_btn.setEnabled(False)
+        url_layout.addWidget(self.parse_btn)
+        
+        source_layout.addLayout(url_layout)
+        source_group.setLayout(source_layout)
+        layout.addWidget(source_group)
+        
         tabs = QTabWidget()
-        prev_tab = QWidget(); prev_l = QVBoxLayout(prev_tab); self.preview_text = QTextEdit(); self.preview_text.setReadOnly(True); prev_l.addWidget(self.preview_text); tabs.addTab(prev_tab, "Podgląd")
-        svc_tab = QWidget(); svc_l = QVBoxLayout(svc_tab); self.services_table = QTableWidget(); self.services_table.setColumnCount(3); self.services_table.setHorizontalHeaderLabels(["Usługa", "Typ", "UUID"]); self.services_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); svc_l.addWidget(self.services_table); tabs.addTab(svc_tab, "Usługi")
+        
+        preview_tab = QWidget()
+        preview_layout = QVBoxLayout(preview_tab)
+        
+        self.preview_text = QTextEdit()
+        self.preview_text.setReadOnly(True)
+        preview_layout.addWidget(self.preview_text)
+        
+        tabs.addTab(preview_tab, "Podgląd listy")
+        
+        services_tab = QWidget()
+        services_layout = QVBoxLayout(services_tab)
+        
+        self.services_table = QTableWidget()
+        self.services_table.setColumnCount(3)
+        self.services_table.setHorizontalHeaderLabels(["Nazwa usługi", "Typ", "UUID"])
+        self.services_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        services_layout.addWidget(self.services_table)
+        
+        tabs.addTab(services_tab, "Usługi TVHeadend")
+        
         layout.addWidget(tabs)
-
-        imp_g = QGroupBox("Import")
-        imp_l = QVBoxLayout()
-        opt_l = QHBoxLayout()
-        opt_l.addWidget(QLabel("Próg:")); self.threshold_spin = QSpinBox(); self.threshold_spin.setRange(5,100); self.threshold_spin.setValue(5); self.threshold_spin.setSuffix("%"); opt_l.addWidget(self.threshold_spin)
-        self.create_tags_check = QCheckBox("Twórz tagi"); self.create_tags_check.setChecked(True); opt_l.addWidget(self.create_tags_check); opt_l.addStretch()
-        imp_l.addLayout(opt_l)
-        self.import_btn = QPushButton("Importuj do TVHeadend"); self.import_btn.clicked.connect(self.start_import); self.import_btn.setEnabled(False); imp_l.addWidget(self.import_btn)
-        self.progress_bar = QProgressBar(); imp_l.addWidget(self.progress_bar)
-        self.status_text = QTextEdit(); self.status_text.setMaximumHeight(100); self.status_text.setReadOnly(True); imp_l.addWidget(self.status_text)
-        imp_g.setLayout(imp_l); layout.addWidget(imp_g)
-
+        
+        import_group = QGroupBox("Opcje importu")
+        import_layout = QVBoxLayout()
+        
+        options_layout = QHBoxLayout()
+        options_layout.addWidget(QLabel("Próg podobieństwa:"))
+        self.threshold_spin = QSpinBox()
+        self.threshold_spin.setRange(5, 100)
+        self.threshold_spin.setValue(5)
+        self.threshold_spin.setSuffix("%")
+        options_layout.addWidget(self.threshold_spin)
+        
+        self.create_tags_check = QCheckBox("Twórz tagi z kategorii")
+        self.create_tags_check.setChecked(True)
+        options_layout.addWidget(self.create_tags_check)
+        options_layout.addStretch()
+        
+        import_layout.addLayout(options_layout)
+        
+        self.import_btn = QPushButton("Importuj bouquety do TVHeadend")
+        self.import_btn.clicked.connect(self.start_import)
+        self.import_btn.setEnabled(False)
+        import_layout.addWidget(self.import_btn)
+        
+        self.progress_bar = QProgressBar()
+        import_layout.addWidget(self.progress_bar)
+        
+        self.status_text = QTextEdit()
+        self.status_text.setMaximumHeight(100)
+        self.status_text.setReadOnly(True)
+        import_layout.addWidget(self.status_text)
+        
+        import_group.setLayout(import_layout)
+        layout.addWidget(import_group)
+        
     def connect_tvh(self):
         try:
-            self.api = TVHeadendAPI(self.host_input.text(), self.port_input.text(), self.user_input.text(), self.pass_input.text())
+            host = self.host_input.text()
+            port = self.port_input.text()
+            user = self.user_input.text()
+            password = self.pass_input.text()
+            
+            self.api = TVHeadendAPI(host, port, user, password)
             self.services = self.api.get_services()
-            self.services_label.setText(f"Połączono: {len(self.services)} usług")
+            
+            self.services_label.setText(f"Status: Połączony - znaleziono {len(self.services)} usług")
             self.parse_btn.setEnabled(True)
+            
             self.services_table.setRowCount(len(self.services))
-            for i, s in enumerate(self.services):
-                self.services_table.setItem(i, 0, QTableWidgetItem(s.get('svcname','')))
-                self.services_table.setItem(i, 1, QTableWidgetItem(s.get('svctype','')))
-                self.services_table.setItem(i, 2, QTableWidgetItem(s.get('uuid','')))
-            self.status_text.append("Połączono")
-        except Exception as e: QMessageBox.critical(self, "Błąd", str(e))
-
+            for i, service in enumerate(self.services):
+                self.services_table.setItem(i, 0, QTableWidgetItem(service.get('svcname', '')))
+                self.services_table.setItem(i, 1, QTableWidgetItem(service.get('svctype', '')))
+                self.services_table.setItem(i, 2, QTableWidgetItem(service.get('uuid', '')))
+            
+            self.status_text.append(f"✓ Połączono z TVHeadend ({len(self.services)} usług)")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Błąd połączenia", str(e))
+            self.services_label.setText("Status: Błąd połączenia")
+    
     def parse_bouquet(self):
         try:
             url = self.url_input.text()
-            if not url: raise ValueError("Podaj URL")
+            if not url:
+                QMessageBox.warning(self, "Błąd", "Podaj URL listy kanałów")
+                return
+            
             self.bouquets = BouquetParser.parse_satkurier(url)
-            total = sum(len(v) for v in self.bouquets.values())
+            
             preview = ""
-            for cat, chs in self.bouquets.items():
-                preview += f"\n{'='*60}\n{cat} ({len(chs)})\n{'='*60}\n"
-                for ch in chs[:10]:
+            total_channels = 0
+            for category, channels in self.bouquets.items():
+                preview += f"\n{'='*80}\n{category} ({len(channels)} kanałów)\n{'='*80}\n"
+                for ch in channels[:10]:
                     preview += f"{ch['number']:3d}. {ch['name']}\n"
-                if len(chs)>10: preview += f"... i {len(chs)-10} więcej\n"
+                
+                if len(channels) > 10:
+                    preview += f"... i {len(channels) - 10} więcej\n"
+                total_channels += len(channels)
+            
             self.preview_text.setText(preview)
-            self.status_text.append(f"Pobrano: {len(self.bouquets)} kat., {total} kanałów")
-            if self.services: self.import_btn.setEnabled(True)
-        except Exception as e: QMessageBox.critical(self, "Błąd", str(e))
-
+            self.status_text.append(f"✓ Pobrano listę: {len(self.bouquets)} kategorii, {total_channels} kanałów")
+            
+            if self.services:
+                self.import_btn.setEnabled(True)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Błąd parsowania", str(e))
+    
     def start_import(self):
-        if not self.api or not self.bouquets: return
+        if not self.api or not self.bouquets:
+            return
+        
         self.import_btn.setEnabled(False)
-        self.worker = ImportWorker(self.api, self.bouquets, self.services, self.threshold_spin.value()/100.0, self.create_tags_check.isChecked())
+        threshold = self.threshold_spin.value() / 100.0
+        create_tags = self.create_tags_check.isChecked()
+        
+        self.worker = ImportWorker(self.api, self.bouquets, self.services, threshold, create_tags)
         self.worker.progress.connect(self.update_progress)
         self.worker.finished.connect(self.import_finished)
         self.worker.start()
-
-    def update_progress(self, v, m): self.progress_bar.setValue(v); self.status_text.append(m)
-    def import_finished(self, ok, msg): self.import_btn.setEnabled(True); (QMessageBox.information if ok else QMessageBox.critical)(self, "Sukces" if ok else "Błąd", msg)
+    
+    def update_progress(self, value, message):
+        self.progress_bar.setValue(value)
+        self.status_text.append(message)
+    
+    def import_finished(self, success, message):
+        self.import_btn.setEnabled(True)
+        if success:
+            QMessageBox.information(self, "Sukces", message)
+        else:
+            QMessageBox.critical(self, "Błąd", message)
 
 
 def main():
     app = QApplication(sys.argv)
-    app.setFont(QFont("", 9))
-    win = MainWindow()
-    win.show()
+    
+    font = QFont()
+    font.setPointSize(9)
+    app.setFont(font)
+    
+    window = MainWindow()
+    window.show()
+    
     sys.exit(app.exec())
+
 
 if __name__ == '__main__':
     main()
