@@ -540,7 +540,7 @@ class MainWindow(QMainWindow):
         url_layout = QHBoxLayout()
         url_layout.addWidget(QLabel("URL listy:"))
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("https://satkurier.pl/news/234203/lista-kanalow-polsat-box.html")
+        self.url_input.setPlaceholderText("https://satkurier.pl/news/236485/polskie-kanaly-tv-za-darmo-z-satelity.html")
         url_layout.addWidget(self.url_input)
         
         self.parse_btn = QPushButton("Pobierz listę")
